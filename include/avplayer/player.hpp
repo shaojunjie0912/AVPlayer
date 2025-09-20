@@ -72,6 +72,14 @@ public:
     // 更新视频时钟
     double SynchronizeVideo(const AVFrame* frame, double pts);
 
+    double GetCurrentPosition() const {
+        std::lock_guard lk{clock_mtx_};
+        if (last_frame_pts_ > 0) {
+            return last_frame_pts_;
+        }
+        return GetMasterClock();
+    }
+
     // =============== 控制 ===============
     // 切换暂停/播放状态
     void TogglePause();

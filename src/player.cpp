@@ -337,7 +337,7 @@ void Player::AudioCallback(uint8_t* stream, int len) {
 void Player::StartThreads() {
     read_thread_ = std::jthread{[this] { ReadLoop(); }};                 // 启动读取线程
     video_decode_thread_ = std::jthread{[this] { VideoDecodeLoop(); }};  // 启动视频解码线程
-    SDL_PauseAudio(0);                                                   // 启动音频回调
+    SDL_PauseAudio(0);                                                   // 启动音频回调线程
 }
 
 int Player::DecodeVideoFrame() {
@@ -515,6 +515,8 @@ void Player::VideoRefreshHandler() {
 
     // 计算当前视频帧的 pts 与参考时钟的差值 (>0: 视频快了, <0: 视频慢了)
     double diff = pts - ref_clock;
+    // 音画同步误差(40ms 以内)
+    // LOG_INFO("音画同步误差: {}ms", diff * 1000);
 
     // 动态同步阈值 (阈值至少是MIN，但不超过MAX，并与帧延迟相关联，是ffplay的经典做法)
     // 让低帧率视频有更宽松的同步范围，高帧率视频有更严格的范围，非常智能!
@@ -693,7 +695,7 @@ void Player::SeekTo(double time_seconds) {
         return;
     }
 
-    // 清空缓冲区
+    // 清空队列缓冲区
     video_packet_queue_.Clear();
     audio_packet_queue_.Clear();
     video_frame_queue_.Clear();

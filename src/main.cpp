@@ -71,10 +71,11 @@ int main(int argc, char* argv[]) {
                     player.TogglePause();
                 } else if (event.key.keysym.sym == SDLK_LEFT) {
                     LOG_INFO("快退 5 秒");
-                    player.SeekTo(player.GetMasterClock() - 5.0);
+                    // TODO: 应该用 GetMasterClock 吗?
+                    player.SeekTo(player.GetCurrentPosition() - 5.0);
                 } else if (event.key.keysym.sym == SDLK_RIGHT) {
                     LOG_INFO("快进 5 秒");
-                    player.SeekTo(player.GetMasterClock() + 5.0);
+                    player.SeekTo(player.GetCurrentPosition() + 5.0);
                 }
             }
         }
