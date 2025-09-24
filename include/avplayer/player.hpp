@@ -130,11 +130,11 @@ private:
     uint32_t audio_buffer_index_{0};     // 音频缓冲区索引
 
     // 音视频同步
-    double audio_clock_{0.0};       // 音频时钟 (主时钟)
-    double video_clock_{0.0};       // 视频时钟
-    double frame_timer_{0.0};       // 用于消除累计误差的高精度视频同步校正时钟
-    double last_frame_pts_{0.0};    // 上一帧显示时间戳
-    double last_frame_delay_{0.0};  // 上一帧显示延迟
+    double audio_clock_{0.0};          // 音频时钟 (主时钟)
+    double video_clock_{0.0};          // 视频时钟
+    double frame_timer_{0.0};          // 用于消除累计误差的高精度视频同步校正时钟
+    double last_frame_pts_{0.0};       // 上一帧显示时间戳
+    double last_frame_duration_{0.0};  // 上一帧显示延迟
     //
     std::atomic_bool stop_{false};    // 是否停止
     std::atomic_bool paused_{false};  // 是否暂停

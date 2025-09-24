@@ -504,34 +504,39 @@ void Player::VideoRefreshHandler() {
         SDL_PushEvent(&event);
         return;
     }
+
     // ======================== 音视频同步逻辑 =======================
-    double pts = decoded_frame->pts_;  // 当前帧的 pts
-    // 通过两帧显示时间戳(PTS)的差值，来计算一帧的理论持续时间。
-    // NOTE: 如果上一帧的 pts 为 0，则认为这是第一帧，间隔为 0。
-    // NOTE: 也动态变化, 并不是固定的 1/帧率
-    double delay = last_frame_pts_ == 0 ? 0 : pts - last_frame_pts_;
-    // NOTE: 容错机制: 时间戳回退/跳变
-    if (delay <= 0 || delay >= 1.0) {  // 如果 delay <=0/>=1秒, 则使用上一帧的持续时间
-        delay = last_frame_delay_;
+
+    // 1. 计算当前帧的理论持续时间
+    double frame_pts = decoded_frame->pts_;  // 当前帧的 pts
+    double frame_duration = last_frame_pts_ == 0 ? 0 : frame_pts - last_frame_pts_;
+    if (frame_duration <= 0 ||
+        frame_duration >= 1.0) {  // NOTE: 时间戳回退/跳变, 使用上一帧的持续时间
+        frame_duration = last_frame_duration_;
     }
-    last_frame_delay_ = delay;
-    last_frame_pts_ = pts;
+    last_frame_duration_ = frame_duration;
+    last_frame_pts_ = frame_pts;
 
-    double ref_clock = GetMasterClock();  // 获取参考时钟
+    // 2. 计算为了校正系统定时器误差, 距离理想显示时刻的剩余时间
+    frame_timer_ += frame_duration;
+    double schedule_delay = frame_timer_ - (static_cast<double>(av_gettime()) / 1000000.0);
+    // 设置最小延迟, 防止在视频严重追赶时, 定时器过于频繁地触发, 导致 CPU 忙等
+    if (schedule_delay < 0.010) {
+        schedule_delay = 0.010;
+    }
 
-    // 计算当前视频帧的理想显示时间戳 pts 与参考时钟的差值
-    // > 0: 视频快了, < 0: 视频慢了
-    double diff = pts - ref_clock;
+    // 3. 计算与主时钟的差距, 并应用同步策略
+    double ref_clock = GetMasterClock();
+    double diff = frame_pts - ref_clock;
+    // 动态同步阈值 (阈值至少是MIN，但不超过MAX，并与帧延迟相关联，是ffplay的经典做法)
+    double sync_threshold =
+        std::max(kMinAvSyncThreshold, std::min(kMaxAvSyncThreshold, frame_duration));
 
     // 音画同步误差(40ms 以内)
     // LOG_INFO("音画同步误差: {}ms", diff * 1000);
 
-    // 动态同步阈值 (阈值至少是MIN，但不超过MAX，并与帧延迟相关联，是ffplay的经典做法)
-    // 让低帧率视频有更宽松的同步范围，高帧率视频有更严格的范围，非常智能!
-    double sync_threshold = std::max(kMinAvSyncThreshold, std::min(kMaxAvSyncThreshold, delay));
-
-    // ref_clock(音频时钟) 如果某一个音频帧没有有效pts, 会置 audio_clock_ 为 NAN
-    // 这里需要进行有效性检查
+    double av_sync_delay = frame_duration;  // NOTE: 用于音视频同步的延迟，初始值为帧时长
+    // 有效性检查
     if (!isnan(ref_clock) && !isnan(diff) && std::abs(diff) < kAvNoSyncThreshold) {
         if (diff <= -sync_threshold) {
             // NOTE: 丢帧逻辑
@@ -544,23 +549,19 @@ void Player::VideoRefreshHandler() {
         if (diff >= sync_threshold) {
             // 视频超前，需要增加延迟等待音频。
             // 将理论延迟加倍是一种简单有效的策略。
-            delay = delay * 2;
+            av_sync_delay = frame_duration * 2;
         }
     }
 
-    // 计算并安排下一次刷新
-    // 操作系统调度和其他程序的干扰等因素会导致定时器回调的实际执行时间与我们期望的时间有微小的偏差
-    // 如果只简单的 ScheduleNextVideoRefresh(delay), 会造成累计误差
-    // 作为“理想时刻表”，加上经过同步调整后的 delay，计算出下一帧最理想的显示时刻。
-    frame_timer_ += delay;
-    double actual_delay = frame_timer_ - (static_cast<double>(av_gettime()) / 1000000.0);
-    // 设置一个最小延迟（10毫秒），可以防止在视频严重追赶时，定时器过于频繁地触发，
-    // 导致CPU占用率过高（忙等）。
-    if (actual_delay < 0.010) {
-        actual_delay = 0.010;
-    }
+    // 4. 计算最终的刷新延迟
+    // 最终延迟必须同时满足两个条件：
+    //  a) 保证长期的平均帧率 (schedule_delay)
+    //  b) 等待主时钟同步 (av_sync_delay)
+    // 因此取二者的最大值。
+    double final_delay = std::max(schedule_delay, av_sync_delay);
+
     // 安排下一次定时器回调
-    ScheduleNextVideoRefresh(static_cast<int>(actual_delay * 1000 + 0.5));
+    ScheduleNextVideoRefresh(static_cast<int>(final_delay * 1000 + 0.5));
     // 直接渲染当前帧
     RenderVideoFrame();
 }
@@ -727,7 +728,7 @@ void Player::SeekTo(double time_seconds) {
         // 重置帧定时器, 将其校准为当前的系统时间，为下一次延迟计算提供正确的基准
         frame_timer_ = static_cast<double>(av_gettime()) / 1000000.0;
         last_frame_pts_ = 0.0;
-        last_frame_delay_ = 0.0;
+        last_frame_duration_ = 0.0;
     }
 }
 
