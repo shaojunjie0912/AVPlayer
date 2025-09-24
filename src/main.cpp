@@ -6,6 +6,9 @@
 #include <stdexcept>
 #include <string>
 
+// TODO: 在 player.Run() 之前，新增一个事件循环来处理暂停/播放
+// 将事件处理逻辑与 player 内部的渲染循环解耦
+
 int main(int argc, char* argv[]) {
     // 1. 设置和解析命令行参数
     cxxopts::Options options(argv[0], "一个基于 SDL2 和 FFmpeg 的简易播放器");
@@ -21,7 +24,7 @@ int main(int argc, char* argv[]) {
       ("d,logdir", "设置日志目录", cxxopts::value<std::string>()->default_value("logs"));
     // clang-format on
 
-    // 我们需要能够解析位置参数（即没有-f标志的文件名）
+    // 我们需要能够解析位置参数（即没有-i标志的文件名）
     options.parse_positional({"inputfile"});
 
     auto result = options.parse(argc, argv);
@@ -49,29 +52,25 @@ int main(int argc, char* argv[]) {
 
     try {
         avplayer::Player player{media_file};
-        // 在 player.Run() 之前，新增一个事件循环来处理暂停/播放
-        // 将事件处理逻辑与 player 内部的渲染循环解耦
         SDL_Event event;
         while (true) {
             SDL_WaitEvent(&event);
-            // 如果是退出事件，需要手动停止播放器并退出循环
+            // 1. 退出事件
             if (event.type == SDL_QUIT) {
-                player.Stop();  // 我们需要在 Player 类中增加这个方法
+                player.Stop();
                 break;
             }
-            // 如果是视频刷新事件，交给播放器处理
+            // 2. 视频刷新事件
             else if (event.type == avplayer::kFFRefreshEvent) {
                 player.VideoRefreshHandler();
             }
-            // 如果是键盘按下事件
+            // 3. 按键事件
             else if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_SPACE) {
-                    // 如果是空格键，切换暂停/播放状态
                     LOG_INFO("切换暂停/播放状态");
                     player.TogglePause();
                 } else if (event.key.keysym.sym == SDLK_LEFT) {
                     LOG_INFO("快退 5 秒");
-                    // TODO: 应该用 GetMasterClock 吗?
                     player.SeekTo(player.GetCurrentPosition() - 5.0);
                 } else if (event.key.keysym.sym == SDLK_RIGHT) {
                     LOG_INFO("快进 5 秒");

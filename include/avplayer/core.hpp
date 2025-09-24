@@ -119,8 +119,9 @@ class PacketQueue {
 public:
     PacketQueue(std::size_t max_data_bytes) : max_data_bytes_(max_data_bytes) {}
     ~PacketQueue() = default;
-    PacketQueue(const PacketQueue&) = delete;
-    PacketQueue(PacketQueue&&) = delete;
+    // 禁止拷贝和移动
+    PacketQueue(PacketQueue const&) = delete;
+    PacketQueue& operator=(PacketQueue const&) = delete;
 
 public:
     // Push (阻塞)
@@ -159,10 +160,10 @@ struct DecodedFrame {
     double pts_{};         // 帧的显示时间戳
     double duration_{};    // 帧的估计持续时间
     int64_t pos_{};        // 帧在输入文件或流中的字节位置 (NOTE: 精确跳转 (Seek) 快进快退)
+    AVRational sar_{};     // 帧的宽高比
     int width_{};          // 帧的宽度
     int height_{};         // 帧的高度
     int format_{};         // 帧的像素格式
-    AVRational sar_{};     // 帧的宽高比
 };
 
 // ================== FrameQueue Class ==================

@@ -24,9 +24,6 @@ public:
     Player& operator=(const Player&) = delete;
 
 public:
-    // void Run();
-
-public:
     // =============== 初始化 ===============
     void InitSDL();
     void OpenInputFile();
@@ -72,6 +69,7 @@ public:
     // 更新视频时钟
     double SynchronizeVideo(const AVFrame* frame, double pts);
 
+    // TODO: 这是干嘛?
     double GetCurrentPosition() const {
         std::lock_guard lk{clock_mtx_};
         if (last_frame_pts_ > 0) {

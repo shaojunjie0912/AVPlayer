@@ -134,10 +134,8 @@ void FrameQueue::Close() {
         return;
     }
     closed_ = true;
-    // 唤醒可能在等待写入的线程 (生产者)
-    cv_can_write_.notify_all();
-    // 唤醒可能在等待读取的线程 (消费者)
-    cv_can_read_.notify_all();
+    cv_can_write_.notify_all();  // 唤醒生产者
+    cv_can_read_.notify_all();   // 唤醒消费者
 }
 
 void FrameQueue::Clear() {

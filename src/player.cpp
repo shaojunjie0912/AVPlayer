@@ -5,6 +5,11 @@
 // NOTE: 一个 AVPacket 可能对应一个或多个 AVFrame (音频)
 // 但也可能多个 AVPacket 才可以解码出一个 AVFrame (比如: 视频帧间依赖)
 
+// 帧率  一帧持续时间
+//  60      16.67ms
+//  30      33.33ms
+//  25      40ms
+
 namespace avplayer {
 
 // =============================================================================
@@ -503,9 +508,10 @@ void Player::VideoRefreshHandler() {
     double pts = decoded_frame->pts_;  // 当前帧的 pts
     // 通过两帧显示时间戳(PTS)的差值，来计算一帧的理论持续时间。
     // NOTE: 如果上一帧的 pts 为 0，则认为这是第一帧，间隔为 0。
+    // NOTE: 也动态变化, 并不是固定的 1/帧率
     double delay = last_frame_pts_ == 0 ? 0 : pts - last_frame_pts_;
     // NOTE: 容错机制: 时间戳回退/跳变
-    if (delay <= 0 || delay >= 1.0) {  // 如果间隔小于0或大于1秒, 则使用上一帧的间隔
+    if (delay <= 0 || delay >= 1.0) {  // 如果 delay <=0/>=1秒, 则使用上一帧的持续时间
         delay = last_frame_delay_;
     }
     last_frame_delay_ = delay;
@@ -513,8 +519,10 @@ void Player::VideoRefreshHandler() {
 
     double ref_clock = GetMasterClock();  // 获取参考时钟
 
-    // 计算当前视频帧的 pts 与参考时钟的差值 (>0: 视频快了, <0: 视频慢了)
+    // 计算当前视频帧的理想显示时间戳 pts 与参考时钟的差值
+    // > 0: 视频快了, < 0: 视频慢了
     double diff = pts - ref_clock;
+
     // 音画同步误差(40ms 以内)
     // LOG_INFO("音画同步误差: {}ms", diff * 1000);
 
