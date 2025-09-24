@@ -22,18 +22,17 @@ Player::Player(std::string file_path)
       audio_packet_queue_(kMaxPacketQueueDataBytes),
       video_frame_queue_(kMaxFrameQueueSize),  // 默认不保留上一帧
       audio_frame_(av_frame_alloc()) {
-    InitSDL();
-    OpenInputFile();
-    FindStreams();
+    InitSDL();        // 初始化 SDL
+    OpenInputFile();  // 打开输入文件
+    FindStreams();    // 查找流
     if (video_stream_idx_ != -1) {
-        OpenStreamComponent(video_stream_idx_);
+        OpenStreamComponent(video_stream_idx_);  // 打开视频流组件
     }
     if (audio_stream_idx_ != -1) {
-        OpenStreamComponent(audio_stream_idx_);
+        OpenStreamComponent(audio_stream_idx_);  // 打开音频流组件
     }
-    StartThreads();
-    // 手动调度第一次视频刷新
-    ScheduleNextVideoRefresh(40);
+    StartThreads();                // 启动线程
+    ScheduleNextVideoRefresh(40);  // 手动调度第一次视频刷新
 }
 
 Player::~Player() {
@@ -342,6 +341,7 @@ void Player::AudioCallback(uint8_t* stream, int len) {
 void Player::StartThreads() {
     read_thread_ = std::jthread{[this] { ReadLoop(); }};                 // 启动读取线程
     video_decode_thread_ = std::jthread{[this] { VideoDecodeLoop(); }};  // 启动视频解码线程
+    render_thread_ = std::jthread{[this] { RenderLoop(); }};             // 启动渲染准备线程
     SDL_PauseAudio(0);                                                   // 启动音频回调线程
 }
 
@@ -481,7 +481,73 @@ uint32_t Player::VideoRefreshTimerWrapper(uint32_t /*interval*/, void* opaque) {
     return 0;
 }
 
-// 核心视频时钟->音频时钟同步逻辑
+// 通知渲染线程准备数据
+void Player::NotifyRenderReady() {
+    {
+        std::lock_guard lk{render_mtx_};
+        render_data_ready_ = true;
+    }
+    render_cv_.notify_one();
+}
+
+// 渲染准备线程：处理音视频同步逻辑，准备渲染数据
+void Player::RenderLoop() {
+    LOG_INFO("渲染准备线程开始!");
+    while (!stop_.load()) {
+        std::unique_lock lk{render_mtx_};
+        render_cv_.wait(lk, [this] { return stop_.load() || render_data_ready_; });
+        if (stop_.load()) {
+            break;
+        }
+
+        // 执行 VideoRefreshHandler 逻辑，但不直接调用SDL渲染
+        VideoRefreshHandler();
+        render_data_ready_ = false;
+    }
+    LOG_INFO("渲染准备线程结束!");
+}
+
+// 主线程快速渲染：使用预先准备好的渲染命令
+void Player::RenderVideoFrame() {
+    // 原子读取当前渲染命令
+    RenderCommand* cmd = curr_render_cmd_.load();
+    if (!cmd || cmd->type != RenderCommand::Type::RENDER_FRAME) {
+        return;  // 没有可渲染的数据
+    }
+
+    const auto& frame_data = cmd->frame_data;
+
+    // 检查纹理尺寸是否需要更新
+    if (!texture_ || (texture_ && (frame_data.width != last_texture_width_ ||
+                                   frame_data.height != last_texture_height_))) {
+        texture_.reset(SDL_CreateTexture(renderer_.get(), SDL_PIXELFORMAT_IYUV,
+                                         SDL_TEXTUREACCESS_STREAMING, frame_data.width,
+                                         frame_data.height));
+        if (!texture_) {
+            LOG_ERROR("RenderVideoFrame: 创建 SDL 纹理失败: {}", SDL_GetError());
+            return;
+        }
+        last_texture_width_ = frame_data.width;
+        last_texture_height_ = frame_data.height;
+    }
+
+    // 使用预先拷贝的YUV数据更新纹理
+    SDL_UpdateYUVTexture(texture_.get(), nullptr, frame_data.y_data.data(), frame_data.y_linesize,
+                         frame_data.u_data.data(), frame_data.u_linesize, frame_data.v_data.data(),
+                         frame_data.v_linesize);
+
+    SDL_Rect rect;
+    // 计算显示区域
+    CalculateDisplayRect(&rect, window_x_, window_y_, window_width_, window_height_,
+                         frame_data.width, frame_data.height, frame_data.sar);
+
+    // 渲染视频帧（快速SDL调用）
+    SDL_RenderClear(renderer_.get());
+    SDL_RenderCopy(renderer_.get(), texture_.get(), nullptr, &rect);
+    SDL_RenderPresent(renderer_.get());
+}
+
+// 异步版本 VideoRefreshHandler：准备渲染数据但不执行SDL调用
 void Player::VideoRefreshHandler() {
     if (stop_.load() || paused_.load()) {
         return;
@@ -562,41 +628,51 @@ void Player::VideoRefreshHandler() {
 
     // 安排下一次定时器回调
     ScheduleNextVideoRefresh(static_cast<int>(final_delay * 1000 + 0.5));
-    // 直接渲染当前帧
-    RenderVideoFrame();
+
+    // 准备渲染命令 (拷贝帧数据到渲染命令)
+    PrepareRenderCommand(decoded_frame);
 }
 
-void Player::RenderVideoFrame() {
-    auto decoded_frame = video_frame_queue_.PeekReadable();
-    if (!decoded_frame) {  // 一般不会没有吧
-        LOG_ERROR("RenderVideoFrame: 没有可读的视频解码帧!");
-        return;
-    }
-
+// 准备渲染命令：将AVFrame数据拷贝到渲染命令中
+void Player::PrepareRenderCommand(DecodedFrame* decoded_frame) {
     const AVFrame* frame = decoded_frame->frame_.get();
 
-    if (!texture_) {
-        texture_.reset(SDL_CreateTexture(renderer_.get(), SDL_PIXELFORMAT_IYUV,
-                                         SDL_TEXTUREACCESS_STREAMING, frame->width, frame->height));
-        if (!texture_) {
-            LOG_ERROR("RenderVideoFrame: 创建 SDL 纹理失败: {}", SDL_GetError());
-            return;
-        }
-    }
+    // 获取写入缓冲区索引
+    int write_index = write_cmd_idx_.load();
+    RenderCommand* cmd = &render_cmds_[write_index];
 
-    SDL_UpdateYUVTexture(texture_.get(), nullptr, frame->data[0], frame->linesize[0],
-                         frame->data[1], frame->linesize[1], frame->data[2], frame->linesize[2]);
+    // 填充渲染命令
+    cmd->type = RenderCommand::Type::RENDER_FRAME;
+    cmd->frame_data.pts = decoded_frame->pts_;
+    cmd->frame_data.duration = decoded_frame->duration_;
+    cmd->frame_data.width = frame->width;
+    cmd->frame_data.height = frame->height;
+    cmd->frame_data.sar = frame->sample_aspect_ratio;
+    cmd->frame_data.y_linesize = frame->linesize[0];
+    cmd->frame_data.u_linesize = frame->linesize[1];
+    cmd->frame_data.v_linesize = frame->linesize[2];
 
-    SDL_Rect rect;
-    // 计算显示区域
-    CalculateDisplayRect(&rect, window_x_, window_y_, window_width_, window_height_, frame->width,
-                         frame->height, frame->sample_aspect_ratio);
+    // 拷贝YUV数据（关键：避免跨线程共享AVFrame）
+    size_t y_size = frame->linesize[0] * frame->height;
+    size_t u_size = frame->linesize[1] * frame->height / 2;
+    size_t v_size = frame->linesize[2] * frame->height / 2;
 
-    // 渲染视频帧
-    SDL_RenderClear(renderer_.get());
-    SDL_RenderCopy(renderer_.get(), texture_.get(), nullptr, &rect);
-    SDL_RenderPresent(renderer_.get());
-    video_frame_queue_.MoveReadIndex();  // 释放视频帧
+    cmd->frame_data.y_data.resize(y_size);
+    cmd->frame_data.u_data.resize(u_size);
+    cmd->frame_data.v_data.resize(v_size);
+
+    std::memcpy(cmd->frame_data.y_data.data(), frame->data[0], y_size);
+    std::memcpy(cmd->frame_data.u_data.data(), frame->data[1], u_size);
+    std::memcpy(cmd->frame_data.v_data.data(), frame->data[2], v_size);
+
+    // 原子操作：切换到新的渲染命令
+    curr_render_cmd_.store(cmd);
+
+    // 切换写入索引
+    write_cmd_idx_.store(1 - write_index);
+
+    // 释放解码帧
+    video_frame_queue_.MoveReadIndex();
 }
 
 double Player::GetMasterClock() const {
@@ -659,6 +735,8 @@ void Player::Stop() {
     video_packet_queue_.Close();
     audio_packet_queue_.Close();
     video_frame_queue_.Close();
+    // 唤醒渲染线程
+    render_cv_.notify_one();
 }
 
 void Player::TogglePause() {

@@ -3,7 +3,9 @@
 #include <atomic>
 #include <avplayer/core.hpp>
 #include <avplayer/logger.hpp>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -11,6 +13,33 @@
 // NOTE: 选择音频时钟作为主时钟:
 
 namespace avplayer {
+
+// ================== 渲染命令结构 ==================
+struct RenderCommand {
+    enum class Type {
+        RENDER_FRAME,         // 渲染
+        UPDATE_TEXTURE_SIZE,  // 更新纹理尺寸
+    };
+
+    // 渲染帧数据 (仅在渲染线程中填充，主线程只读)
+    struct FrameData {
+        double pts;
+        double duration;
+        int width;
+        int height;
+        AVRational sar;
+        // YUV数据的拷贝（避免跨线程共享AVFrame）
+        std::vector<uint8_t> y_data;
+        std::vector<uint8_t> u_data;
+        std::vector<uint8_t> v_data;
+        int y_linesize;
+        int u_linesize;
+        int v_linesize;
+    };
+
+    Type type;
+    FrameData frame_data;
+};
 
 // ================== Player Class ==================
 class Player {
@@ -52,10 +81,16 @@ public:
     static uint32_t VideoRefreshTimerWrapper(uint32_t interval, void* opaque);
     // 调度下一帧视频刷新
     void ScheduleNextVideoRefresh(int delay_ms);
-    // 视频刷新处理 (包含音视频同步)
-    void VideoRefreshHandler();
-    // 渲染视频帧
+    // 渲染视频帧 (主线程调用，快速执行)
     void RenderVideoFrame();
+    // 渲染线程循环 (准备渲染数据)
+    void RenderLoop();
+    // 异步视频刷新处理 (在渲染线程中执行)
+    void VideoRefreshHandler();
+    // 准备渲染命令
+    void PrepareRenderCommand(DecodedFrame* decoded_frame);
+    // 通知渲染线程准备数据
+    void NotifyRenderReady();
     // 计算视频显示区域
     void CalculateDisplayRect(SDL_Rect* rect, int window_x, int window_y, int window_width,
                               int window_height, int picture_width, int picture_height,
@@ -69,7 +104,6 @@ public:
     // 更新视频时钟
     double SynchronizeVideo(const AVFrame* frame, double pts);
 
-    // TODO: 这是干嘛?
     double GetCurrentPosition() const {
         std::lock_guard lk{clock_mtx_};
         if (last_frame_pts_ > 0) {
@@ -110,8 +144,9 @@ private:
     mutable std::mutex clock_mtx_;
 
     // 线程
-    std::jthread read_thread_;
-    std::jthread video_decode_thread_;
+    std::jthread read_thread_;          // 读取线程
+    std::jthread video_decode_thread_;  // 视频解码线程
+    std::jthread render_thread_;        // 渲染准备线程
 
     // SDL
     UniqueSDLWindow window_;
@@ -121,6 +156,8 @@ private:
     int window_y_{0};
     int window_width_{kDefaultWidth};
     int window_height_{kDefaultHeight};
+    int last_texture_width_{0};   // 上次纹理宽度
+    int last_texture_height_{0};  // 上次纹理高度
 
     // 音频状态
     UniqueSwrContext audio_swr_ctx_;     // 音频重采样上下文
@@ -135,7 +172,17 @@ private:
     double frame_timer_{0.0};          // 用于消除累计误差的高精度视频同步校正时钟
     double last_frame_pts_{0.0};       // 上一帧显示时间戳
     double last_frame_duration_{0.0};  // 上一帧显示延迟
-    //
+
+    // 渲染命令队列（双缓冲）
+    std::atomic<RenderCommand*> curr_render_cmd_{nullptr};  // 当前可用于渲染的命令
+    RenderCommand render_cmds_[2];                          // 双缓冲渲染命令
+    std::atomic<int> write_cmd_idx_{0};                     // 当前写入的命令索引
+
+    // 渲染线程同步
+    std::mutex render_mtx_;
+    std::condition_variable render_cv_;
+    std::atomic_bool render_data_ready_{false};  // 渲染数据准备就绪标志
+
     std::atomic_bool stop_{false};    // 是否停止
     std::atomic_bool paused_{false};  // 是否暂停
 };

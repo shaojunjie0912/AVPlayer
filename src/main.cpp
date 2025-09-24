@@ -6,12 +6,9 @@
 #include <stdexcept>
 #include <string>
 
-// TODO: 在 player.Run() 之前，新增一个事件循环来处理暂停/播放
-// 将事件处理逻辑与 player 内部的渲染循环解耦
-
 int main(int argc, char* argv[]) {
     // 1. 设置和解析命令行参数
-    cxxopts::Options options(argv[0], "一个基于 SDL2 和 FFmpeg 的简易播放器");
+    cxxopts::Options options(argv[0], "基于 FFmpeg & SDL2 的现代 C++ 音视频播放器");
     std::string log_level;
     std::string log_dir;
     std::string media_file;
@@ -60,9 +57,10 @@ int main(int argc, char* argv[]) {
                 player.Stop();
                 break;
             }
-            // 2. 视频刷新事件
+            // 2. 视频刷新事件 - 通知渲染线程准备数据，然后快速渲染
             else if (event.type == avplayer::kFFRefreshEvent) {
-                player.VideoRefreshHandler();
+                player.NotifyRenderReady();  // 通知渲染线程准备数据
+                player.RenderVideoFrame();   // 主线程快速执行SDL渲染
             }
             // 3. 按键事件
             else if (event.type == SDL_KEYDOWN) {
